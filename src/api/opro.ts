@@ -27,23 +27,22 @@ export interface ScorerResponse {
 }
 
 /**
- * Call Gemini to generate new prompts (Optimizer)
+ * Call Gemini once to generate a single prompt (Optimizer)
  */
-export async function generatePrompts(
+async function generateSinglePrompt(
   metaPrompt: string,
-  k: number,
   temperature: number,
   model: string,
   updateRequest: (inputTokens: number, outputTokens: number) => void
-): Promise<string[]> {
+): Promise<string> {
   let attempt = 0;
   const retries = 3;
-  
+
   const config = {
-    maxOutputTokens: 2048,
+    maxOutputTokens: 40960,
     temperature,
     thinkingConfig: {
-      thinkingBudget: 0,
+      thinkingBudget: 20480,
     },
   };
 
@@ -65,30 +64,60 @@ export async function generatePrompts(
         throw new Error('Empty response from LLM');
       }
 
-      // Extract prompts between <INS> and </INS> tags
-      const insRegex = /<INS>([\s\S]*?)<\/INS>/g;
-      const matches = [...text.matchAll(insRegex)];
-      const prompts = matches.map(match => match[1].trim());
+      // Extract prompt between <INS> and </INS> tags
+      const insRegex = /<INS>([\s\S]*?)<\/INS>/;
+      const match = text.match(insRegex);
 
-      if (prompts.length === 0) {
-        console.warn('No prompts found in response, trying to parse as plain text');
-        // Fallback: split by newlines and filter empty lines
-        const lines = text.split('\n').filter(line => line.trim().length > 0);
-        return lines.slice(0, k);
+      if (match && match[1]) {
+        return match[1].trim();
       }
 
-      return prompts.slice(0, k);
+      // Fallback: return the entire text if no tags found
+      console.warn('No <INS> tags found in response, using entire text');
+      return text.trim();
     } catch (error) {
       console.error(`Attempt ${attempt + 1} failed for optimizer:`, error);
       attempt++;
       if (attempt >= retries) {
-        throw new Error(`Failed to generate prompts after ${retries} attempts`);
+        throw new Error(`Failed to generate prompt after ${retries} attempts`);
       }
       await new Promise(res => setTimeout(res, 1000 * attempt * attempt));
     }
   }
 
-  throw new Error('Failed to generate prompts');
+  throw new Error('Failed to generate prompt');
+}
+
+/**
+ * Call Gemini k times to generate k prompts (Optimizer)
+ * Each prompt is generated independently with a separate API call
+ */
+export async function generatePrompts(
+  metaPrompt: string,
+  k: number,
+  temperature: number,
+  model: string,
+  updateRequest: (inputTokens: number, outputTokens: number) => void
+): Promise<string[]> {
+  const prompts: string[] = [];
+
+  console.log(`Generating ${k} prompts with ${k} separate API calls...`);
+
+  // Make k separate API calls to generate k independent prompts
+  for (let i = 0; i < k; i++) {
+    console.log(`Generating prompt ${i + 1}/${k}...`);
+    try {
+      const prompt = await generateSinglePrompt(metaPrompt, temperature, model, updateRequest);
+      prompts.push(prompt);
+      console.log(`Successfully generated prompt ${i + 1}/${k}`);
+    } catch (error) {
+      console.error(`Failed to generate prompt ${i + 1}/${k}:`, error);
+      throw new Error(`Failed to generate prompt ${i + 1}/${k}: ${error}`);
+    }
+  }
+
+  console.log(`Successfully generated all ${k} prompts`);
+  return prompts;
 }
 
 /**

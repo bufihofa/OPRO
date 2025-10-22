@@ -25,12 +25,23 @@ export interface Step {
 }
 
 /**
+ * A question-answer pair from the test dataset
+ */
+export interface QuestionAnswer {
+  question: string;
+  goldAnswer: number;
+}
+
+/**
  * Configuration for OPRO optimization
  */
 export interface OPROConfig {
   k: number; // Number of prompts to generate per step
-  temperature: number; // Temperature for LLM generation
-  model: string; // Model to use for optimization
+  topX: number; // Number of top-scoring prompts to include in meta-prompt
+  optimizerModel: string; // Model to use for generating prompts
+  optimizerTemperature: number; // Temperature for prompt generation
+  scorerModel: string; // Model to use for scoring prompts
+  scorerTemperature: number; // Temperature for scoring prompts
 }
 
 /**
@@ -42,6 +53,7 @@ export interface Session {
   currentStep: number;
   steps: Step[];
   config: OPROConfig;
+  testSet: QuestionAnswer[]; // Test dataset for scoring
   createdAt: number;
   updatedAt: number;
 }
@@ -50,7 +62,6 @@ export interface Session {
  * Options for automation
  */
 export interface AutomationOptions {
-  autoScore: boolean;
-  autoNextStep: boolean;
+  fullyAutomatic: boolean; // When enabled, automatically scores all prompts and progresses through steps
 }
 

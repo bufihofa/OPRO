@@ -1,6 +1,14 @@
-import type { Session, Step, Prompt, OPROConfig } from '../types/opro';
+import type { Session, Step, Prompt, OPROConfig, QuestionAnswer } from '../types/opro';
 
 const SESSIONS_KEY = 'opro_sessions';
+
+/**
+ * Randomly select n items from an array
+ */
+function randomSample<T>(array: T[], n: number): T[] {
+  const shuffled = [...array].sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, Math.min(n, array.length));
+}
 
 /**
  * Generate a unique ID
@@ -42,42 +50,43 @@ export function getSession(sessionId: string): Session | null {
 
 /**
  * Create initial meta-prompt for step 1
+ * Note: This will be called k times to generate k independent prompts
  */
-function createInitialMetaPrompt(k: number): string {
-  return `Your task is to generate ${k} different instructions <INS> for solving math word problems.
+function createInitialMetaPrompt(testSet: QuestionAnswer[]): string {
+  // Randomly select 3 examples from the test set
+  const examples = randomSample(testSet, 3);
+
+  let metaPrompt = `Your task is to generate a single instruction <INS> for solving math word problems.
 
 Below are some example problems:
 
-Problem:
-Q: Alannah, Beatrix, and Queen are preparing for the new school year and have been given books by their parents. Alannah has 20 more books than Beatrix. Queen has 1/5 times more books than Alannah. If Beatrix has 30 books, how many books do the three have together?
+`;
+
+  // Add the random examples
+  for (const example of examples) {
+    metaPrompt += `Problem:
+Q: ${example.question}
 A: <INS>
 Ground truth answer:
-140
+${example.goldAnswer}
 
-Problem:
-Q: Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?
-A: <INS>
-Ground truth answer:
-72
+`;
+  }
 
-Problem:
-Q: Weng earns $12 an hour for babysitting. Yesterday, she just did 50 minutes of babysitting. How much did she earn?
-A: <INS>
-Ground truth answer:
-10
+  metaPrompt += `Generate one instruction that could help solve these types of math word problems. The instruction should begin with <INS> and end with </INS>. Make the instruction creative and effective.`;
 
-Generate ${k} different instructions that could help solve these types of math word problems. Each instruction should begin with <INS> and end with </INS>. Make the instructions diverse and creative.`;
+  return metaPrompt;
 }
 
 /**
  * Create a new session
  */
-export function createSession(name: string, config: OPROConfig): Session {
+export function createSession(name: string, config: OPROConfig, testSet: QuestionAnswer[]): Session {
   const sessionId = generateId();
   const now = Date.now();
-  
-  const initialMetaPrompt = createInitialMetaPrompt(config.k);
-  
+
+  const initialMetaPrompt = createInitialMetaPrompt(testSet);
+
   const session: Session = {
     id: sessionId,
     name,
@@ -89,14 +98,15 @@ export function createSession(name: string, config: OPROConfig): Session {
       createdAt: now,
     }],
     config,
+    testSet,
     createdAt: now,
     updatedAt: now,
   };
-  
+
   const sessions = getAllSessions();
   sessions.push(session);
   saveAllSessions(sessions);
-  
+
   return session;
 }
 
@@ -175,63 +185,73 @@ export function updatePrompt(session: Session, promptId: string, updates: Partia
 /**
  * Create a new step with meta-prompt based on previous step's results
  */
-export function createNextStep(session: Session, k: number): Session {
+export function createNextStep(session: Session): Session {
   const currentStep = session.steps.find(s => s.stepNumber === session.currentStep);
-  
+
   if (!currentStep) {
     throw new Error(`Current step ${session.currentStep} not found`);
   }
-  
-  // Sort prompts by score in descending order
-  const sortedPrompts = [...currentStep.prompts]
-    .filter(p => p.score !== null)
-    .sort((a, b) => (b.score || 0) - (a.score || 0));
-  
+
+  // Collect all scored prompts from all previous steps
+  const allScoredPrompts: Prompt[] = [];
+  for (const step of session.steps) {
+    const scoredInStep = step.prompts.filter(p => p.score !== null);
+    allScoredPrompts.push(...scoredInStep);
+  }
+
+  // Sort by score descending and take top X
+  const topX = session.config.topX;
+  const topPrompts = [...allScoredPrompts]
+    .sort((a, b) => (b.score || 0) - (a.score || 0))
+    .slice(0, topX);
+
+  // Reverse to show in ascending order (low to high)
+  topPrompts.reverse();
+
+  // Randomly select 3 examples from the test set
+  const examples = randomSample(session.testSet, 3);
+
   // Build meta-prompt with previous results
-  let metaPrompt = `Your task is to generate ${k} different instructions <INS> for solving math word problems.
+  // Note: This will be called k times to generate k independent prompts
+  let metaPrompt = `Your task is to generate a single instruction <INS> for solving math word problems.
 
 Below are some previous instructions with their scores. The score ranges from 0 to 100.
 
 `;
-  
-  // Add previous instructions and scores
-  for (const prompt of sortedPrompts) {
+
+  // Add previous instructions and scores (in ascending order)
+  for (const prompt of topPrompts) {
     metaPrompt += `text:\n${prompt.text}\nscore:\n${prompt.score}\n\n`;
   }
-  
+
   metaPrompt += `Below are some example problems:
 
-Problem:
-Q: Alannah, Beatrix, and Queen are preparing for the new school year and have been given books by their parents. Alannah has 20 more books than Beatrix. Queen has 1/5 times more books than Alannah. If Beatrix has 30 books, how many books do the three have together?
+`;
+
+  // Add the random examples
+  for (const example of examples) {
+    metaPrompt += `Problem:
+Q: ${example.question}
 A: <INS>
 Ground truth answer:
-140
+${example.goldAnswer}
 
-Problem:
-Q: Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?
-A: <INS>
-Ground truth answer:
-72
+`;
+  }
 
-Problem:
-Q: Weng earns $12 an hour for babysitting. Yesterday, she just did 50 minutes of babysitting. How much did she earn?
-A: <INS>
-Ground truth answer:
-10
+  metaPrompt += `Generate one instruction that is different from all the instructions <INS> above, and has a higher score than all the instructions <INS> above. The instruction should begin with <INS> and end with </INS>. Make the instruction creative and effective.`;
 
-Generate ${k} instructions that are different from all the instructions <INS> above, and have a higher score than all the instructions <INS> above. Each instruction should begin with <INS> and end with </INS>. Make the instructions diverse and creative.`;
-  
   const newStep: Step = {
     stepNumber: session.currentStep + 1,
     prompts: [],
     metaPrompt,
     createdAt: Date.now(),
   };
-  
+
   session.steps.push(newStep);
   session.currentStep = newStep.stepNumber;
   updateSession(session);
-  
+
   return session;
 }
 

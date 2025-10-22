@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import type { Session, OPROConfig } from '../types/opro';
 import { getAllSessions, createSession, deleteSession } from '../utils/sessionStorage';
+import { readTSVFile, type QuestionAnswer } from '../utils/tsvReader';
 
 interface SessionManagerProps {
   onSelectSession: (session: Session) => void;
@@ -11,8 +12,19 @@ export function SessionManager({ onSelectSession }: SessionManagerProps) {
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [newSessionName, setNewSessionName] = useState('');
   const [k, setK] = useState(5);
-  const [temperature, setTemperature] = useState(1.0);
-  const [model, setModel] = useState('gemini-2.0-flash-lite');
+  const [topX, setTopX] = useState(5);
+  const [optimizerModel, setOptimizerModel] = useState('gemini-2.5-pro');
+  const [optimizerTemperature, setOptimizerTemperature] = useState(1.0);
+  const [scorerModel, setScorerModel] = useState('gemini-2.5-flash-lite');
+  const [scorerTemperature, setScorerTemperature] = useState(0.0);
+  const [testData, setTestData] = useState<QuestionAnswer[]>([]);
+
+  // Load test data
+  useEffect(() => {
+    readTSVFile('gsm_test.tsv')
+      .then(data => setTestData(data))
+      .catch(error => console.error('Error loading test data:', error));
+  }, []);
 
   const handleCreateSession = () => {
     if (!newSessionName.trim()) {
@@ -20,13 +32,21 @@ export function SessionManager({ onSelectSession }: SessionManagerProps) {
       return;
     }
 
+    if (testData.length === 0) {
+      alert('Test data not loaded yet. Please wait a moment and try again.');
+      return;
+    }
+
     const config: OPROConfig = {
       k,
-      temperature,
-      model,
+      topX,
+      optimizerModel,
+      optimizerTemperature,
+      scorerModel,
+      scorerTemperature,
     };
 
-    const session = createSession(newSessionName, config);
+    const session = createSession(newSessionName, config, testData);
     setSessions(getAllSessions());
     setNewSessionName('');
     setShowCreateForm(false);
@@ -89,11 +109,44 @@ export function SessionManager({ onSelectSession }: SessionManagerProps) {
           </div>
           <div style={{ marginBottom: '10px' }}>
             <label>
-              Temperature:
+              Top X prompts in meta-prompt (topX):
               <input
                 type="number"
-                value={temperature}
-                onChange={(e) => setTemperature(Number(e.target.value))}
+                value={topX}
+                onChange={(e) => setTopX(Number(e.target.value))}
+                min="1"
+                max="50"
+                style={{ marginLeft: '10px', padding: '5px', width: '100px' }}
+              />
+            </label>
+            <div style={{ fontSize: '12px', color: '#666', marginTop: '5px', marginLeft: '10px' }}>
+              Number of highest-scoring prompts to include in meta-prompt (sorted ascending)
+            </div>
+          </div>
+
+          <h4 style={{ marginTop: '20px', marginBottom: '10px' }}>Optimizer LLM Configuration</h4>
+          <div style={{ marginBottom: '10px' }}>
+            <label>
+              Optimizer Model:
+              <select
+                value={optimizerModel}
+                onChange={(e) => setOptimizerModel(e.target.value)}
+                style={{ marginLeft: '10px', padding: '5px', width: '200px' }}
+              >
+                <option value="gemini-2.0-flash-lite">gemini-2.0-flash-lite</option>
+                <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
+                <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+              </select>
+            </label>
+          </div>
+          <div style={{ marginBottom: '10px' }}>
+            <label>
+              Optimizer Temperature:
+              <input
+                type="number"
+                value={optimizerTemperature}
+                onChange={(e) => setOptimizerTemperature(Number(e.target.value))}
                 min="0"
                 max="2"
                 step="0.1"
@@ -101,12 +154,14 @@ export function SessionManager({ onSelectSession }: SessionManagerProps) {
               />
             </label>
           </div>
+
+          <h4 style={{ marginTop: '20px', marginBottom: '10px' }}>Scorer LLM Configuration</h4>
           <div style={{ marginBottom: '10px' }}>
             <label>
-              Model:
+              Scorer Model:
               <select
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
+                value={scorerModel}
+                onChange={(e) => setScorerModel(e.target.value)}
                 style={{ marginLeft: '10px', padding: '5px', width: '200px' }}
               >
                 <option value="gemini-2.0-flash-lite">gemini-2.0-flash-lite</option>
@@ -116,13 +171,28 @@ export function SessionManager({ onSelectSession }: SessionManagerProps) {
               </select>
             </label>
           </div>
-          <button 
+          <div style={{ marginBottom: '10px' }}>
+            <label>
+              Scorer Temperature:
+              <input
+                type="number"
+                value={scorerTemperature}
+                onChange={(e) => setScorerTemperature(Number(e.target.value))}
+                min="0"
+                max="2"
+                step="0.1"
+                style={{ marginLeft: '10px', padding: '5px', width: '100px' }}
+              />
+            </label>
+          </div>
+
+          <button
             onClick={handleCreateSession}
             style={{ marginRight: '10px', padding: '8px 16px' }}
           >
             Create
           </button>
-          <button 
+          <button
             onClick={() => setShowCreateForm(false)}
             style={{ padding: '8px 16px' }}
           >
@@ -151,7 +221,13 @@ export function SessionManager({ onSelectSession }: SessionManagerProps) {
               <div>
                 <strong>{session.name}</strong>
                 <div style={{ fontSize: '14px', color: '#666', marginTop: '5px' }}>
-                  Step {session.currentStep} | k={session.config.k} | temp={session.config.temperature} | {session.config.model}
+                  Step {session.currentStep} | k={session.config.k} | topX={session.config.topX}
+                </div>
+                <div style={{ fontSize: '12px', color: '#999', marginTop: '3px' }}>
+                  Optimizer: {session.config.optimizerModel} (temp={session.config.optimizerTemperature})
+                </div>
+                <div style={{ fontSize: '12px', color: '#999', marginTop: '3px' }}>
+                  Scorer: {session.config.scorerModel} (temp={session.config.scorerTemperature})
                 </div>
                 <div style={{ fontSize: '12px', color: '#999', marginTop: '3px' }}>
                   Created: {new Date(session.createdAt).toLocaleString()}
