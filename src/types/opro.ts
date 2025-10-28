@@ -45,6 +45,17 @@ export interface OPROConfig {
 }
 
 /**
+ * Statistics for a session
+ */
+export interface SessionStatistics {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalRequests: number;
+  correctCount: number;
+  incorrectCount: number;
+}
+
+/**
  * A complete OPRO session
  */
 export interface Session {
@@ -54,6 +65,7 @@ export interface Session {
   steps: Step[];
   config: OPROConfig;
   testSet: QuestionAnswer[]; // Test dataset for scoring
+  statistics: SessionStatistics; // Session statistics
   createdAt: number;
   updatedAt: number;
 }

@@ -22,11 +22,39 @@ function generateId(): string {
  */
 export function getAllSessions(): Session[] {
   const sessionsJson = localStorage.getItem(SESSIONS_KEY);
-  if (!sessionsJson) {
-    return [];
-  }
+  if (!sessionsJson) return [];
+  
   try {
-    return JSON.parse(sessionsJson);
+    const sessions = JSON.parse(sessionsJson);
+    // Migrate old sessions that don't have statistics
+    return sessions.map((session: any) => {
+      if (!session.statistics) {
+        session.statistics = {
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+          totalRequests: 0,
+          correctCount: 0,
+          incorrectCount: 0,
+        };
+      }
+      
+      // ✅ NEW: Reset any 'scoring' prompts to 'pending' on load
+      // This handles interrupted sessions (e.g., page refresh, network disconnect)
+      if (session.steps) {
+        session.steps.forEach((step: Step) => {
+          if (step.prompts) {
+            step.prompts.forEach((prompt: Prompt) => {
+              if (prompt.state === 'scoring') {
+                prompt.state = 'pending';
+                console.log(`Reset prompt ${prompt.id} from 'scoring' to 'pending'`);
+              }
+            });
+          }
+        });
+      }
+      
+      return session;
+    });
   } catch (error) {
     console.error('Error parsing sessions from localStorage:', error);
     return [];
@@ -56,24 +84,23 @@ function createInitialMetaPrompt(testSet: QuestionAnswer[]): string {
   // Randomly select 3 examples from the test set
   const examples = randomSample(testSet, 3);
 
-  let metaPrompt = `Your task is to generate a single instruction <INS> for solving math word problems.
-
-Below are some example problems:
+  let metaPrompt = `I have some texts along with their corresponding scores. The texts are arranged in ascending order based on their scores, where higher scores indicate better quality.
 
 `;
 
   // Add the random examples
   for (const example of examples) {
-    metaPrompt += `Problem:
+    metaPrompt += `input:
 Q: ${example.question}
 A: <INS>
-Ground truth answer:
+output:
 ${example.goldAnswer}
 
 `;
   }
 
-  metaPrompt += `Generate one instruction that could help solve these types of math word problems. The instruction should begin with <INS> and end with </INS>. Make the instruction creative and effective.`;
+  metaPrompt += `Write your new text that is different from the old ones and has a score as high as possible. Write the text in square brackets.
+`;
 
   return metaPrompt;
 }
@@ -99,6 +126,13 @@ export function createSession(name: string, config: OPROConfig, testSet: Questio
     }],
     config,
     testSet,
+    statistics: {
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalRequests: 0,
+      correctCount: 0,
+      incorrectCount: 0,
+    },
     createdAt: now,
     updatedAt: now,
   };
@@ -124,6 +158,38 @@ export function updateSession(session: Session): void {
   session.updatedAt = Date.now();
   sessions[index] = session;
   saveAllSessions(sessions);
+}
+
+/**
+ * Update session statistics
+ */
+export function updateSessionStatistics(
+  session: Session,
+  updates: Partial<{
+    inputTokens: number;
+    outputTokens: number;
+    requests: number;
+    correct: number;
+    incorrect: number;
+  }>
+): void {
+  if (updates.inputTokens !== undefined) {
+    session.statistics.totalInputTokens += updates.inputTokens;
+  }
+  if (updates.outputTokens !== undefined) {
+    session.statistics.totalOutputTokens += updates.outputTokens;
+  }
+  if (updates.requests !== undefined) {
+    session.statistics.totalRequests += updates.requests;
+  }
+  if (updates.correct !== undefined) {
+    session.statistics.correctCount += updates.correct;
+  }
+  if (updates.incorrect !== undefined) {
+    session.statistics.incorrectCount += updates.incorrect;
+  }
+
+  updateSession(session);
 }
 
 /**
@@ -213,9 +279,7 @@ export function createNextStep(session: Session): Session {
 
   // Build meta-prompt with previous results
   // Note: This will be called k times to generate k independent prompts
-  let metaPrompt = `Your task is to generate a single instruction <INS> for solving math word problems.
-
-Below are some previous instructions with their scores. The score ranges from 0 to 100.
+  let metaPrompt = `I have some texts along with their corresponding scores. The texts are arranged in ascending order based on their scores, where higher scores indicate better quality.
 
 `;
 
@@ -224,7 +288,9 @@ Below are some previous instructions with their scores. The score ranges from 0 
     metaPrompt += `text:\n${prompt.text}\nscore:\n${prompt.score}\n\n`;
   }
 
-  metaPrompt += `Below are some example problems:
+  metaPrompt += `The following exemplars show how to apply your text: you replace <INS> in each input with your
+text, then read the input and give an output. We say your output is wrong if your output is different
+from the given output, and we say your output is correct if they are the same.
 
 `;
 
@@ -239,7 +305,8 @@ ${example.goldAnswer}
 `;
   }
 
-  metaPrompt += `Generate one instruction that is different from all the instructions <INS> above, and has a higher score than all the instructions <INS> above. The instruction should begin with <INS> and end with </INS>. Make the instruction creative and effective.`;
+  metaPrompt += `Write your new text that is different from the old ones and has a score as high as possible. Write the text in square brackets.
+`;
 
   const newStep: Step = {
     stepNumber: session.currentStep + 1,
