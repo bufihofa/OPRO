@@ -79,8 +79,9 @@ export function getSession(sessionId: string): Session | null {
 /**
  * Create initial meta-prompt for step 1
  * Note: This will be called k times to generate k independent prompts
+ * Now includes step 0 prompts and their scores
  */
-function createInitialMetaPrompt(testSet: QuestionAnswer[]): string {
+function createInitialMetaPrompt(testSet: QuestionAnswer[], step0Prompts: Prompt[]): string {
   // Randomly select 3 examples from the test set
   const examples = randomSample(testSet, 3);
 
@@ -88,12 +89,23 @@ function createInitialMetaPrompt(testSet: QuestionAnswer[]): string {
 
 `;
 
+  // Add step 0 prompts and scores (already in ascending order by score)
+  for (const prompt of step0Prompts) {
+    metaPrompt += `text:\n${prompt.text}\nscore:\n${prompt.score}\n\n`;
+  }
+
+  metaPrompt += `The following exemplars show how to apply your text: you replace <INS> in each input with your
+text, then read the input and give an output. We say your output is wrong if your output is different
+from the given output, and we say your output is correct if they are the same.
+
+`;
+
   // Add the random examples
   for (const example of examples) {
-    metaPrompt += `input:
+    metaPrompt += `Problem:
 Q: ${example.question}
 A: <INS>
-output:
+Ground truth answer:
 ${example.goldAnswer}
 
 `;
@@ -112,18 +124,52 @@ export function createSession(name: string, config: OPROConfig, testSet: Questio
   const sessionId = generateId();
   const now = Date.now();
 
-  const initialMetaPrompt = createInitialMetaPrompt(testSet);
+  // Create step 0 with initial prompts and scores
+  const step0Prompts: Prompt[] = [
+    {
+      id: generateId(),
+      text: "Let's solve the problem.",
+      score: 87.02,
+      state: 'scored' as const,
+      createdAt: now,
+    },
+    {
+      id: generateId(),
+      text: "Let's figure it out!",
+      score: 89.31,
+      state: 'scored' as const,
+      createdAt: now + 1,
+    },
+    {
+      id: generateId(),
+      text: "Let's think step by step.",
+      score: 90.08,
+      state: 'scored' as const,
+      createdAt: now + 2,
+    },
+  ];
+
+  // Create initial meta-prompt for step 1 with step 0 prompts
+  const initialMetaPrompt = createInitialMetaPrompt(testSet, step0Prompts);
 
   const session: Session = {
     id: sessionId,
     name,
     currentStep: 1,
-    steps: [{
-      stepNumber: 1,
-      prompts: [],
-      metaPrompt: initialMetaPrompt,
-      createdAt: now,
-    }],
+    steps: [
+      {
+        stepNumber: 0,
+        prompts: step0Prompts,
+        metaPrompt: '', // Step 0 doesn't need a meta-prompt
+        createdAt: now,
+      },
+      {
+        stepNumber: 1,
+        prompts: [],
+        metaPrompt: initialMetaPrompt,
+        createdAt: now,
+      }
+    ],
     config,
     testSet,
     statistics: {
@@ -265,9 +311,18 @@ export function createNextStep(session: Session): Session {
     allScoredPrompts.push(...scoredInStep);
   }
 
+  // ✅ NEW: Remove duplicate prompts, keeping only the one with highest score
+  const uniquePrompts = new Map<string, Prompt>();
+  for (const prompt of allScoredPrompts) {
+    const existing = uniquePrompts.get(prompt.text);
+    if (!existing || (prompt.score || 0) > (existing.score || 0)) {
+      uniquePrompts.set(prompt.text, prompt);
+    }
+  }
+
   // Sort by score descending and take top X
   const topX = session.config.topX;
-  const topPrompts = [...allScoredPrompts]
+  const topPrompts = Array.from(uniquePrompts.values())
     .sort((a, b) => (b.score || 0) - (a.score || 0))
     .slice(0, topX);
 
@@ -288,9 +343,7 @@ export function createNextStep(session: Session): Session {
     metaPrompt += `text:\n${prompt.text}\nscore:\n${prompt.score}\n\n`;
   }
 
-  metaPrompt += `The following exemplars show how to apply your text: you replace <INS> in each input with your
-text, then read the input and give an output. We say your output is wrong if your output is different
-from the given output, and we say your output is correct if they are the same.
+  metaPrompt += `The following exemplars show how to apply your text: you replace <INS> in each input with your text, then read the input and give an output. We say your output is wrong if your output is differentfrom the given output, and we say your output is correct if they are the same.
 
 `;
 

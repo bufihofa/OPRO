@@ -64,15 +64,15 @@ async function generateSinglePrompt(
       }
 
       // Extract prompt between <INS> and </INS> tags
-      const insRegex = /<INS>([\s\S]*?)<\/INS>/;
+      const insRegex = /\[([\s\S]*?)\]/;
       const match = text.match(insRegex);
 
       if (match && match[1]) {
         return match[1].trim();
       }
-
+      
       // Fallback: return the entire text if no tags found
-      console.warn('No <INS> tags found in response, using entire text');
+      console.warn('No [ ] tags found in response, using entire text');
       return text.trim();
     } catch (error) {
       console.error(`Attempt ${attempt + 1} failed for optimizer:`, error);
@@ -132,7 +132,7 @@ async function callGeminiWithRetry(
   updateRequest: (inputTokens: number, outputTokens: number) => void
 ): Promise<ScorerResponse> {
   let attempt = 0;
-  const retries = 3;
+  const retries = 4;
   
   const config = {
     maxOutputTokens: 1024,
@@ -143,11 +143,10 @@ async function callGeminiWithRetry(
     responseMimeType: 'application/json',
     responseSchema: {
       type: Type.OBJECT,
-      required: ["sort_solve", "answer"],
+      required: ["solve", "answer"],
       properties: {
-        sort_solve: {
+        solve: {
           type: Type.STRING,
-          description: "Shortest solve for the question",
         },
         answer: {
           type: Type.NUMBER,

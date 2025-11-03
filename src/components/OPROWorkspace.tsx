@@ -5,7 +5,6 @@ import {
   updatePrompt,
   addPromptsToStep,
   getSession,
-  updateSession,
   updateSessionStatistics
 } from '../utils/sessionStorage';
 import { generatePrompts, scorePrompt } from '../api/oproold';
@@ -30,6 +29,11 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
   });
   const [sortColumn, setSortColumn] = useState<'step' | 'score' | 'state' | 'createdAt'>('score');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+
+  // Custom prompt scoring
+  const [customPrompt, setCustomPrompt] = useState<string>('');
+  const [customPromptScore, setCustomPromptScore] = useState<number | null>(null);
+  const [isScoringCustom, setIsScoringCustom] = useState(false);
 
   // FIX: Track pending automation timeouts for cleanup
   const pendingTimeoutsRef = useRef<number[]>([]);
@@ -100,6 +104,18 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
       setSession(updated);
     }
   };
+
+  // Get fresh current step from storage for live preview
+  const [liveCurrentStep, setLiveCurrentStep] = useState(currentStep);
+  
+  useEffect(() => {
+    // Always get the freshest data from storage
+    const freshSession = getSession(session.id);
+    if (freshSession) {
+      const freshStep = getCurrentStep(freshSession);
+      setLiveCurrentStep(freshStep);
+    }
+  }, [session, session.id]);
 
   const handleGeneratePrompts = async () => {
     if (!currentStep) return;
@@ -344,6 +360,35 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
     }
   };
 
+  const handleScoreCustomPrompt = async () => {
+
+    if (testData.length === 0) {
+      alert('Test data not loaded yet');
+      return;
+    }
+
+    setIsScoringCustom(true);
+    setCustomPromptScore(null);
+
+    try {
+      const score = await scorePrompt(
+        customPrompt,
+        testData,
+        session.config.scorerTemperature,
+        session.config.scorerModel,
+        updateProgress,
+        updateRequest
+      );
+
+      setCustomPromptScore(Math.round(score * 100) / 100);
+    } catch (error) {
+      console.error('Error scoring custom prompt:', error);
+      alert('Failed to score custom prompt. Check console for details.');
+    } finally {
+      setIsScoringCustom(false);
+    }
+  };
+
   const handleNextStep = async () => {
     if (!currentStep) return;
 
@@ -567,11 +612,91 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
         </div>
       </div>
 
+      {/* Custom Prompt Scoring */}
+      <div style={{ marginBottom: '20px', padding: '15px', border: '1px solid #4CAF50', borderRadius: '5px', backgroundColor: '#f9fff9' }}>
+        <h3>Custom Prompt Scoring</h3>
+        <div style={{ fontSize: '12px', color: '#666', marginBottom: '10px' }}>
+          Enter a custom prompt to score it independently without affecting the session
+        </div>
+        <textarea
+          value={customPrompt}
+          onChange={(e) => setCustomPrompt(e.target.value)}
+          placeholder="Enter your custom prompt here..."
+          disabled={isScoringCustom}
+          style={{
+            width: '100%',
+            minHeight: '100px',
+            padding: '10px',
+            fontFamily: 'monospace',
+            fontSize: '13px',
+            border: '1px solid #ccc',
+            borderRadius: '4px',
+            backgroundColor: isScoringCustom ? '#f5f5f5' : 'white',
+            resize: 'vertical',
+            marginBottom: '10px'
+          }}
+        />
+        <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+          <button
+            onClick={handleScoreCustomPrompt}
+            disabled={isScoringCustom || testData.length === 0}
+            style={{
+              padding: '10px 20px',
+              fontSize: '14px',
+              backgroundColor: '#4CAF50',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: (isScoringCustom || testData.length === 0) ? 'not-allowed' : 'pointer',
+              opacity: (isScoringCustom || testData.length === 0) ? 0.6 : 1
+            }}
+          >
+            {isScoringCustom ? 'Scoring...' : 'Score Custom Prompt'}
+          </button>
+          {customPromptScore !== null && (
+            <div style={{
+              padding: '10px 20px',
+              backgroundColor: '#4CAF50',
+              color: 'white',
+              borderRadius: '4px',
+              fontWeight: 'bold',
+              fontSize: '16px'
+            }}>
+              Score: {customPromptScore.toFixed(2)}%
+            </div>
+          )}
+          {isScoringCustom && (
+            <div style={{ fontSize: '14px', color: '#666' }}>
+              Scoring in progress...
+            </div>
+          )}
+          <button
+            onClick={() => {
+              setCustomPrompt('');
+              setCustomPromptScore(null);
+            }}
+            disabled={isScoringCustom}
+            style={{
+              padding: '10px 20px',
+              fontSize: '14px',
+              backgroundColor: '#999',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: isScoringCustom ? 'not-allowed' : 'pointer',
+              opacity: isScoringCustom ? 0.6 : 1
+            }}
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+
       {/* Feature 1: Meta-Prompt Viewer */}
       <div style={{ marginBottom: '20px', padding: '15px', border: '1px solid #ddd', borderRadius: '5px' }}>
-        <h3>Current Step Meta-Prompt</h3>
+        <h3>Current Step Meta-Prompt (Live Preview)</h3>
         <textarea
-          value={currentStep.metaPrompt}
+          value={liveCurrentStep?.metaPrompt || ''}
           readOnly
           style={{
             width: '100%',

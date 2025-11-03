@@ -49,7 +49,6 @@ async function getRandomPrompt(){
     "Act as a Mathematical Cartographer and Analyst: First, meticulously chart your destination by precisely identifying the ultimate question and the expected units of the answer. Then, dissect the problem's landscape: map out all distinct entities, their associated numerical quantities, and the explicit relationships or actions connecting them. Next, construct a detailed dependency map illustrating how each quantity evolves or interacts with others through these connections. Based on this map, plan the most efficient route to your destination, detailing each necessary mathematical operation as a navigational step. Finally, execute this charted course by performing the calculations sequentially, ensuring logical progression at every step, and verify that your final coordinates (the answer) accurately address the original question.",
   ]
   //sleep 100-200ms
-  await new Promise(res => setTimeout(res, Math.floor(Math.random() * 100 + 100)));
   return promptList[Math.floor(Math.random() * promptList.length)];
 }
 async function generateSinglePrompt(
