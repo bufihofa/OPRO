@@ -11,19 +11,19 @@ export function SessionManager({ onSelectSession }: SessionManagerProps) {
   const [sessions, setSessions] = useState<Session[]>(getAllSessions());
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [newSessionName, setNewSessionName] = useState('');
-  const [k, setK] = useState(5);
-  const [topX, setTopX] = useState(5);
-  const [optimizerModel, setOptimizerModel] = useState('gemini-2.5-pro');
+  const [k, setK] = useState(4);
+  const [topX, setTopX] = useState(20);
+  const [optimizerModel, setOptimizerModel] = useState('gemini-2.5-flash');
   const [optimizerTemperature, setOptimizerTemperature] = useState(1.0);
   const [scorerModel, setScorerModel] = useState('gemini-2.5-flash-lite');
   const [scorerTemperature, setScorerTemperature] = useState(0.0);
   const [testData, setTestData] = useState<QuestionAnswer[]>([]);
-
+  const [scoreData, setScoreData] = useState<QuestionAnswer[]>([]);
   // Load test data
   useEffect(() => {
-    readTSVFile('gsm_test.tsv')
+    readTSVFile('gsm_train.tsv')
       .then(data => setTestData(data))
-      .catch(error => console.error('Error loading test data:', error));
+      .catch(error => console.error('Error loading train data:', error));
   }, []);
 
   const handleCreateSession = () => {
@@ -46,7 +46,8 @@ export function SessionManager({ onSelectSession }: SessionManagerProps) {
       scorerTemperature,
     };
 
-    const session = createSession(newSessionName, config, testData);
+    // Only pass testSet for initial meta-prompt generation
+    const session = createSession(newSessionName, config);
     setSessions(getAllSessions());
     setNewSessionName('');
     setShowCreateForm(false);
@@ -102,7 +103,7 @@ export function SessionManager({ onSelectSession }: SessionManagerProps) {
                 value={k}
                 onChange={(e) => setK(Number(e.target.value))}
                 min="1"
-                max="20"
+                max="16"
                 style={{ marginLeft: '10px', padding: '5px', width: '100px' }}
               />
             </label>
@@ -133,7 +134,6 @@ export function SessionManager({ onSelectSession }: SessionManagerProps) {
                 onChange={(e) => setOptimizerModel(e.target.value)}
                 style={{ marginLeft: '10px', padding: '5px', width: '200px' }}
               >
-                <option value="gemini-2.0-flash-lite">gemini-2.0-flash-lite</option>
                 <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
                 <option value="gemini-2.5-flash">gemini-2.5-flash</option>
                 <option value="gemini-2.5-pro">gemini-2.5-pro</option>
@@ -166,8 +166,6 @@ export function SessionManager({ onSelectSession }: SessionManagerProps) {
               >
                 <option value="gemini-2.0-flash-lite">gemini-2.0-flash-lite</option>
                 <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
-                <option value="gemini-1.5-flash">gemini-1.5-flash</option>
-                <option value="gemini-1.5-pro">gemini-1.5-pro</option>
               </select>
             </label>
           </div>

@@ -20,8 +20,6 @@ export interface Prompt {
 export interface Step {
   stepNumber: number;
   prompts: Prompt[];
-  metaPrompt: string;
-  createdAt: number;
 }
 
 /**
@@ -45,17 +43,6 @@ export interface OPROConfig {
 }
 
 /**
- * Statistics for a session
- */
-export interface SessionStatistics {
-  totalInputTokens: number;
-  totalOutputTokens: number;
-  totalRequests: number;
-  correctCount: number;
-  incorrectCount: number;
-}
-
-/**
  * A complete OPRO session
  */
 export interface Session {
@@ -64,16 +51,6 @@ export interface Session {
   currentStep: number;
   steps: Step[];
   config: OPROConfig;
-  testSet: QuestionAnswer[]; // Test dataset for scoring
-  statistics: SessionStatistics; // Session statistics
   createdAt: number;
   updatedAt: number;
 }
-
-/**
- * Options for automation
- */
-export interface AutomationOptions {
-  fullyAutomatic: boolean; // When enabled, automatically scores all prompts and progresses through steps
-}
-

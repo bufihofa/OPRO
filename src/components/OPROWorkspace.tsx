@@ -1,13 +1,14 @@
 import { useState, useEffect, useRef } from 'react';
-import type { Session, Prompt, AutomationOptions } from '../types/opro';
+import type { Session, Prompt } from '../types/opro';
 import {
   getCurrentStep,
   updatePrompt,
   addPromptsToStep,
   getSession,
-  updateSessionStatistics
+  createNextStep,
+  generateMetaPrompt
 } from '../utils/sessionStorage';
-import { generatePrompts, scorePrompt } from '../api/oproold';
+import { generatePrompts, scorePrompt } from '../api/gemini';
 import { readTSVFile, type QuestionAnswer } from '../utils/tsvReader';
 import { ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } from 'recharts';
 
@@ -20,54 +21,45 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
   const [session, setSession] = useState<Session>(initialSession);
   const [testData, setTestData] = useState<QuestionAnswer[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [scoringPromptId, setScoringPromptId] = useState<string | null>(null);
   const [isScoringBatch, setIsScoringBatch] = useState(false);
   const [scoringBatchIds, setScoringBatchIds] = useState<Set<string>>(new Set());
   const [scoreBatchSize, setScoreBatchSize] = useState<number>(initialSession.config.k);
-  const [automationOptions, setAutomationOptions] = useState<AutomationOptions>({
-    fullyAutomatic: false,
-  });
+  const [fullyAutomatic, setFullyAutomatic] = useState(false);
   const [sortColumn, setSortColumn] = useState<'step' | 'score' | 'state' | 'createdAt'>('score');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
-
+  
   // Custom prompt scoring
   const [customPrompt, setCustomPrompt] = useState<string>('');
   const [customPromptScore, setCustomPromptScore] = useState<number | null>(null);
   const [isScoringCustom, setIsScoringCustom] = useState(false);
 
-  // FIX: Track pending automation timeouts for cleanup
   const pendingTimeoutsRef = useRef<number[]>([]);
-
-  // FIX: Track the active session ID to prevent operations on stale sessions
   const activeSessionIdRef = useRef<string>(initialSession.id);
 
   const currentStep = getCurrentStep(session);
 
-  // FIX: Reset all state when session changes
+  // Reset state when session changes
   useEffect(() => {
-    // Clear all pending timeouts from previous session
     pendingTimeoutsRef.current.forEach(timeout => clearTimeout(timeout));
     pendingTimeoutsRef.current = [];
-
-    // Update active session ID
     activeSessionIdRef.current = initialSession.id;
-
-    // Reset all state
+    
     setSession(initialSession);
     setIsGenerating(false);
-    setScoringPromptId(null);
     setIsScoringBatch(false);
     setScoringBatchIds(new Set());
     setScoreBatchSize(initialSession.config.k);
-    setAutomationOptions({ fullyAutomatic: false });
+    setFullyAutomatic(false);
     setSortColumn('score');
     setSortDirection('desc');
-  }, [initialSession.id]); // Re-run when session ID changes
+    setCustomPrompt('');
+    setCustomPromptScore(null);
+    setIsScoringCustom(false);
+  }, [initialSession.id]);
 
-  // FIX: Cleanup on unmount
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
-      // Clear all pending timeouts when component unmounts
       pendingTimeoutsRef.current.forEach(timeout => clearTimeout(timeout));
       pendingTimeoutsRef.current = [];
     };
@@ -75,28 +67,10 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
 
   // Load test data
   useEffect(() => {
-    readTSVFile('gsm_test.tsv')
+    readTSVFile('gsm_train.tsv')
       .then(data => setTestData(data))
       .catch(error => console.error('Error loading test data:', error));
   }, []);
-
-  const updateRequest = (inputTokens: number, outputTokens: number) => {
-    updateSessionStatistics(session, {
-      inputTokens,
-      outputTokens,
-      requests: 1
-    });
-    refreshSession();
-  };
-
-  const updateProgress = (status: boolean) => {
-    if (status) {
-      updateSessionStatistics(session, { correct: 1 });
-    } else {
-      updateSessionStatistics(session, { incorrect: 1 });
-    }
-    refreshSession();
-  };
 
   const refreshSession = () => {
     const updated = getSession(session.id);
@@ -105,67 +79,59 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
     }
   };
 
-  // Get fresh current step from storage for live preview
-  const [liveCurrentStep, setLiveCurrentStep] = useState(currentStep);
-  
-  useEffect(() => {
-    // Always get the freshest data from storage
-    const freshSession = getSession(session.id);
-    if (freshSession) {
-      const freshStep = getCurrentStep(freshSession);
-      setLiveCurrentStep(freshStep);
-    }
-  }, [session, session.id]);
-
   const handleGeneratePrompts = async () => {
-    if (!currentStep) return;
+    if (testData.length === 0) {
+      alert('Test data not loaded yet');
+      return;
+    }
 
-    // FIX: Capture current session ID for validation
     const currentSessionId = session.id;
-
     setIsGenerating(true);
-    try {
-      const prompts = await generatePrompts(
-        currentStep.metaPrompt,
-        session.config.k,
-        session.config.optimizerTemperature,
-        session.config.optimizerModel,
-        updateRequest
-      );
 
-      // FIX: Verify we're still on the same session before updating
-      if (activeSessionIdRef.current !== currentSessionId) {
-        console.log('Session changed during generation, aborting update');
+    try {
+      // Always fetch the latest session/step to avoid stale closures
+      const freshSession = getSession(session.id);
+      if (!freshSession) {
+        console.error('Session not found');
+        return;
+      }
+      const freshStep = getCurrentStep(freshSession);
+      if (!freshStep) {
+        console.error('Current step not found');
         return;
       }
 
-      addPromptsToStep(session, currentStep.stepNumber, prompts);
-      
-      // BUG FIX: Trigger auto-scoring after generation if fully automatic is enabled
-      if (automationOptions.fullyAutomatic && activeSessionIdRef.current === currentSessionId) {
-        // Get the updated session after adding prompts
+      // Generate meta-prompt for current (fresh) step
+      const metaPrompt = generateMetaPrompt(freshSession, testData);
+
+      // Generate k prompts with fresh config
+      const prompts = await generatePrompts(
+        metaPrompt,
+        freshSession.config.k,
+        freshSession.config.optimizerTemperature,
+        freshSession.config.optimizerModel
+      );
+
+      if (activeSessionIdRef.current !== currentSessionId) {
+        console.log('Session changed during generation, aborting');
+        return;
+      }
+
+      // Add prompts to the latest step (not the stale one)
+      addPromptsToStep(freshSession, freshStep.stepNumber, prompts);
+
+      if (fullyAutomatic && activeSessionIdRef.current === currentSessionId) {
         const updatedSession = getSession(session.id);
         if (updatedSession) {
-          // Update local state immediately with the new session
           setSession(updatedSession);
-          
-          const updatedStep = getCurrentStep(updatedSession);
-          if (updatedStep && updatedStep.prompts.length > 0) {
-            const hasUnscored = updatedStep.prompts.some(p => p.state === 'pending');
-            if (hasUnscored) {
-              console.log(`Auto-scoring triggered: ${updatedStep.prompts.filter(p => p.state === 'pending').length} unscored prompts found`);
-              const timeoutId = window.setTimeout(() => {
-                // FIX: Double-check session is still active before executing
-                if (activeSessionIdRef.current === currentSessionId) {
-                  handleScoreKPrompts();
-                }
-              }, 1000);
-              pendingTimeoutsRef.current.push(timeoutId);
+          const timeoutId = window.setTimeout(() => {
+            if (activeSessionIdRef.current === currentSessionId) {
+              handleScoreBatch();
             }
-          }
+          }, 1000);
+          pendingTimeoutsRef.current.push(timeoutId);
         }
       } else {
-        // Normal refresh when auto is not enabled
         refreshSession();
       }
     } catch (error) {
@@ -176,70 +142,16 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
     }
   };
 
-  const handleScorePrompt = async (prompt: Prompt) => {
+  const handleScoreBatch = async () => {
     if (testData.length === 0) {
       alert('Test data not loaded yet');
       return;
     }
 
-    // FIX: Capture current session ID for validation
     const currentSessionId = session.id;
-
-    setScoringPromptId(prompt.id);
-
-    try {
-      // FIX: Verify we're still on the same session
-      if (activeSessionIdRef.current !== currentSessionId) {
-        console.log('Session changed during scoring setup, aborting');
-        return;
-      }
-
-      updatePrompt(session, prompt.id, { state: 'scoring' });
-      refreshSession();
-
-      const score = await scorePrompt(
-        prompt.text,
-        testData,
-        session.config.scorerTemperature,
-        session.config.scorerModel,
-        updateProgress,
-        updateRequest
-      );
-
-      // FIX: Verify we're still on the same session after async operation
-      if (activeSessionIdRef.current !== currentSessionId) {
-        console.log('Session changed during scoring, aborting update');
-        return;
-      }
-
-      updatePrompt(session, prompt.id, {
-        state: 'scored',
-        score: Math.round(score * 100) / 100
-      });
-      refreshSession();
-    } catch (error) {
-      console.error('Error scoring prompt:', error);
-      alert('Failed to score prompt. Check console for details.');
-      updatePrompt(session, prompt.id, { state: 'pending' });
-      refreshSession();
-    } finally {
-      setScoringPromptId(null);
-    }
-  };
-
-  const handleScoreKPrompts = async () => {
-    if (testData.length === 0) {
-      alert('Test data not loaded yet');
-      return;
-    }
-
-    // FIX: Capture current session ID for validation
-    const currentSessionId = session.id;
-
-    // ✅ CRITICAL FIX: Always get fresh session data from storage
     const freshSession = getSession(session.id);
     if (!freshSession) {
-      console.error('Session not found in storage');
+      console.error('Session not found');
       return;
     }
 
@@ -251,57 +163,47 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
 
     const unscoredPrompts = freshStep.prompts.filter(p => p.state === 'pending');
     if (unscoredPrompts.length === 0) {
-      console.log('No unscored prompts found');
-      alert('No unscored prompts');
+      console.log('No unscored prompts');
       return;
     }
 
-    console.log(`Found ${unscoredPrompts.length} unscored prompts`);
-  
-
-    // Take the first k prompts (or all remaining if fewer than k)
     const promptsToScore = unscoredPrompts.slice(0, scoreBatchSize);
-
     console.log(`Scoring ${promptsToScore.length} prompts in parallel...`);
 
     setIsScoringBatch(true);
     setScoringBatchIds(new Set(promptsToScore.map(p => p.id)));
 
     try {
-      // FIX: Verify we're still on the same session
       if (activeSessionIdRef.current !== currentSessionId) {
-        console.log('Session changed during batch scoring setup, aborting');
+        console.log('Session changed, aborting');
         return;
       }
 
-      // Mark all prompts as 'scoring'
+      // Mark all as scoring on the fresh session
       for (const prompt of promptsToScore) {
-        updatePrompt(session, prompt.id, { state: 'scoring' });
+        updatePrompt(freshSession, prompt.id, { state: 'scoring' });
       }
       refreshSession();
 
-      // Create promises for parallel scoring
+      // Score all in parallel
       const scoringPromises = promptsToScore.map((prompt, index) => {
         console.log(`Starting scoring for prompt ${index + 1}/${promptsToScore.length}...`);
 
         return scorePrompt(
           prompt.text,
           testData,
-          session.config.scorerTemperature,
-          session.config.scorerModel,
-          updateProgress,
-          updateRequest
+          freshSession.config.scorerTemperature,
+          freshSession.config.scorerModel
         )
         .then(score => {
-          console.log(`Successfully scored prompt ${index + 1}/${promptsToScore.length}: ${score.toFixed(2)}%`);
+          console.log(`Successfully scored prompt ${index + 1}: ${score.toFixed(2)}%`);
 
-          // FIX: Verify we're still on the same session after async operation
           if (activeSessionIdRef.current !== currentSessionId) {
             console.log('Session changed during scoring, aborting update');
             return null;
           }
 
-          updatePrompt(session, prompt.id, {
+          updatePrompt(freshSession, prompt.id, {
             state: 'scored',
             score: Math.round(score * 100) / 100
           });
@@ -310,37 +212,32 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
           return { promptId: prompt.id, score };
         })
         .catch(error => {
-          console.error(`Failed to score prompt ${index + 1}/${promptsToScore.length}:`, error);
+          console.error(`Failed to score prompt ${index + 1}:`, error);
 
-          // FIX: Verify we're still on the same session
           if (activeSessionIdRef.current !== currentSessionId) {
-            console.log('Session changed during error handling, aborting');
+            console.log('Session changed during error, aborting');
             return null;
           }
 
-          updatePrompt(session, prompt.id, { state: 'pending' });
+          updatePrompt(freshSession, prompt.id, { state: 'pending' });
           refreshSession();
 
-          throw new Error(`Failed to score prompt ${index + 1}/${promptsToScore.length}: ${error}`);
+          throw new Error(`Failed to score prompt ${index + 1}: ${error}`);
         });
       });
 
-      // Wait for all k prompts to be scored in parallel
       await Promise.all(scoringPromises);
+      console.log(`Successfully scored all ${promptsToScore.length} prompts`);
 
-      console.log(`Successfully scored all ${promptsToScore.length} prompts in parallel`);
-
-      // ✅ NEW LOGIC: Check if all prompts are scored, then auto next step
-      if (automationOptions.fullyAutomatic && activeSessionIdRef.current === currentSessionId) {
+      // Check if all scored, then auto next step
+      if (fullyAutomatic && activeSessionIdRef.current === currentSessionId) {
         const updatedSession = getSession(session.id);
         if (updatedSession) {
           const updatedStep = getCurrentStep(updatedSession);
           if (updatedStep) {
             const hasUnscored = updatedStep.prompts.some(p => p.state === 'pending');
 
-            // ❌ REMOVED: Auto-score next batch logic
             if (!hasUnscored) {
-              // ✅ KEPT: Auto next step when all scored
               const timeoutId = window.setTimeout(() => {
                 if (activeSessionIdRef.current === currentSessionId) {
                   handleNextStep();
@@ -360,8 +257,56 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
     }
   };
 
-  const handleScoreCustomPrompt = async () => {
+  const handleNextStep = async () => {
+    // Luôn lấy session mới nhất để tránh ghi đè dữ liệu vừa chấm
+    const freshSession = getSession(session.id);
+    if (!freshSession) {
+      console.error('Session not found');
+      return;
+    }
 
+    const freshStep = getCurrentStep(freshSession);
+    if (!freshStep) {
+      console.error('Current step not found');
+      return;
+    }
+
+    const allScoredFresh =
+      freshStep.prompts.length > 0 && freshStep.prompts.every(p => p.state === 'scored');
+
+    if (!allScoredFresh) {
+      alert('Please score all prompts before proceeding to the next step');
+      return;
+    }
+
+    const currentSessionId = freshSession.id;
+
+    try {
+      const updatedSession = createNextStep(freshSession);
+
+      if (activeSessionIdRef.current !== currentSessionId) {
+        console.log('Session changed, aborting');
+        return;
+      }
+
+      setSession(updatedSession);
+
+      // Auto-generate prompts for new step
+      if (fullyAutomatic && activeSessionIdRef.current === currentSessionId) {
+        const timeoutId = window.setTimeout(() => {
+          if (activeSessionIdRef.current === currentSessionId) {
+            handleGeneratePrompts();
+          }
+        }, 1000);
+        pendingTimeoutsRef.current.push(timeoutId);
+      }
+    } catch (error) {
+      console.error('Error creating next step:', error);
+      alert('Failed to create next step. Check console for details.');
+    }
+  };
+
+  const handleScoreCustomPrompt = async () => {
     if (testData.length === 0) {
       alert('Test data not loaded yet');
       return;
@@ -375,9 +320,7 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
         customPrompt,
         testData,
         session.config.scorerTemperature,
-        session.config.scorerModel,
-        updateProgress,
-        updateRequest
+        session.config.scorerModel
       );
 
       setCustomPromptScore(Math.round(score * 100) / 100);
@@ -389,92 +332,6 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
     }
   };
 
-  const handleNextStep = async () => {
-    if (!currentStep) return;
-
-    const allScored = currentStep.prompts.every(p => p.state === 'scored');
-    if (!allScored) {
-      alert('Please score all prompts before proceeding to the next step');
-      return;
-    }
-
-    // FIX: Capture current session ID for validation
-    const currentSessionId = session.id;
-
-    try {
-      // Import createNextStep dynamically to avoid circular dependency
-      const { createNextStep } = await import('../utils/sessionStorage');
-      const updatedSession = createNextStep(session);
-
-      // FIX: Verify we're still on the same session
-      if (activeSessionIdRef.current !== currentSessionId) {
-        console.log('Session changed during next step creation, aborting');
-        return;
-      }
-
-      setSession(updatedSession);
-
-      // Auto-generate prompts for the new step
-      const newStep = getCurrentStep(updatedSession);
-      if (newStep) {
-        setIsGenerating(true);
-        try {
-          const prompts = await generatePrompts(
-            newStep.metaPrompt,
-            updatedSession.config.k,
-            updatedSession.config.optimizerTemperature,
-            updatedSession.config.optimizerModel,
-            updateRequest
-          );
-
-          // FIX: Verify we're still on the same session after async operation
-          if (activeSessionIdRef.current !== currentSessionId) {
-            console.log('Session changed during prompt generation, aborting update');
-            return;
-          }
-
-          addPromptsToStep(updatedSession, newStep.stepNumber, prompts);
-
-          // BUG FIX: Trigger auto-scoring after generation if fully automatic is enabled
-          if (automationOptions.fullyAutomatic && activeSessionIdRef.current === currentSessionId) {
-            // Get the updated session after adding prompts
-            const finalSession = getSession(updatedSession.id);
-            if (finalSession) {
-              // Update local state immediately with the new session
-              setSession(finalSession);
-              
-              const finalStep = getCurrentStep(finalSession);
-              if (finalStep && finalStep.prompts.length > 0) {
-                const hasUnscored = finalStep.prompts.some(p => p.state === 'pending');
-                if (hasUnscored) {
-                  console.log(`Auto-scoring triggered: ${finalStep.prompts.filter(p => p.state === 'pending').length} unscored prompts found`);
-                  const timeoutId = window.setTimeout(() => {
-                    // FIX: Double-check session is still active before executing
-                    if (activeSessionIdRef.current === currentSessionId) {
-                      handleScoreKPrompts();
-                    }
-                  }, 1000);
-                  pendingTimeoutsRef.current.push(timeoutId);
-                }
-              }
-            }
-          } else {
-            // Normal refresh when auto is not enabled
-            refreshSession();
-          }
-        } catch (error) {
-          console.error('Error generating prompts for new step:', error);
-          alert('Failed to generate prompts for new step. Check console for details.');
-        } finally {
-          setIsGenerating(false);
-        }
-      }
-    } catch (error) {
-      console.error('Error creating next step:', error);
-      alert('Failed to create next step. Check console for details.');
-    }
-  };
-
   if (!currentStep) {
     return <div>Error: Current step not found</div>;
   }
@@ -482,7 +339,7 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
   const allScored = currentStep.prompts.length > 0 && currentStep.prompts.every(p => p.state === 'scored');
   const hasPrompts = currentStep.prompts.length > 0;
 
-  // Get all prompts from all steps for history table
+  // Get all prompts from all steps
   const allPrompts = session.steps.flatMap(step =>
     step.prompts.map(prompt => ({
       ...prompt,
@@ -490,7 +347,7 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
     }))
   );
 
-  // Sort prompts for history table
+  // Sort prompts
   const sortedPrompts = [...allPrompts].sort((a, b) => {
     let comparison = 0;
     switch (sortColumn) {
@@ -510,7 +367,7 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
     return sortDirection === 'asc' ? comparison : -comparison;
   });
 
-  // Get all prompt scores for scatter chart
+  // Chart data
   const allPromptsChartData = session.steps.flatMap(step =>
     step.prompts
       .filter(p => p.score !== null)
@@ -523,7 +380,6 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
       }))
   );
 
-  // Handle column sort
   const handleSort = (column: 'step' | 'score' | 'state' | 'createdAt') => {
     if (sortColumn === column) {
       setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
@@ -555,15 +411,6 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
 
       {/* Statistics */}
       <div style={{ marginBottom: '20px', padding: '15px', border: '1px solid #ddd', borderRadius: '5px' }}>
-        <h3>Statistics</h3>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', marginBottom: '15px' }}>
-          <div>Total Requests: {session.statistics.totalRequests}</div>
-          <div>Input Tokens: {session.statistics.totalInputTokens.toLocaleString()}</div>
-          <div>Output Tokens: {session.statistics.totalOutputTokens.toLocaleString()}</div>
-          <div>Correct: {session.statistics.correctCount}</div>
-          <div>Incorrect: {session.statistics.incorrectCount}</div>
-          <div>Cost: ${(session.statistics.totalInputTokens / 1000000 * 0.1 * 26500 + session.statistics.totalOutputTokens / 1000000 * 0.4 * 26500).toFixed(4)}</div>
-        </div>
 
         {/* Batch Size Configuration */}
         <div style={{ display: 'flex', gap: '10px', alignItems: 'center', paddingTop: '10px', borderTop: '1px solid #ddd' }}>
@@ -581,7 +428,7 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
                 setScoreBatchSize(value);
               }
             }}
-            disabled={isScoringBatch || scoringPromptId !== null}
+            disabled={isScoringBatch}
             style={{
               padding: '8px 12px',
               fontSize: '14px',
@@ -596,19 +443,19 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
         </div>
       </div>
 
-      {/* Automation Options */}
+      {/* Automation */}
       <div style={{ marginBottom: '20px', padding: '15px', border: '1px solid #ddd', borderRadius: '5px' }}>
         <h3>Automation</h3>
         <label>
           <input
             type="checkbox"
-            checked={automationOptions.fullyAutomatic}
-            onChange={(e) => setAutomationOptions({ fullyAutomatic: e.target.checked })}
+            checked={fullyAutomatic}
+            onChange={(e) => setFullyAutomatic(e.target.checked)}
           />
           {' '}Fully Automatic
         </label>
         <div style={{ fontSize: '12px', color: '#666', marginTop: '5px' }}>
-          When enabled: automatically scores all prompts, progresses to next step, and continues the cycle
+          Automatically generates prompts, scores them, and progresses through steps
         </div>
       </div>
 
@@ -616,7 +463,7 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
       <div style={{ marginBottom: '20px', padding: '15px', border: '1px solid #4CAF50', borderRadius: '5px', backgroundColor: '#f9fff9' }}>
         <h3>Custom Prompt Scoring</h3>
         <div style={{ fontSize: '12px', color: '#666', marginBottom: '10px' }}>
-          Enter a custom prompt to score it independently without affecting the session
+          Enter a custom prompt to score it independently
         </div>
         <textarea
           value={customPrompt}
@@ -692,26 +539,6 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
         </div>
       </div>
 
-      {/* Feature 1: Meta-Prompt Viewer */}
-      <div style={{ marginBottom: '20px', padding: '15px', border: '1px solid #ddd', borderRadius: '5px' }}>
-        <h3>Current Step Meta-Prompt (Live Preview)</h3>
-        <textarea
-          value={liveCurrentStep?.metaPrompt || ''}
-          readOnly
-          style={{
-            width: '100%',
-            minHeight: '200px',
-            padding: '10px',
-            fontFamily: 'monospace',
-            fontSize: '13px',
-            border: '1px solid #ccc',
-            borderRadius: '4px',
-            backgroundColor: '#f9f9f9',
-            resize: 'vertical'
-          }}
-        />
-      </div>
-
       {/* Actions */}
       <div style={{ marginBottom: '20px', display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
         {!hasPrompts && (
@@ -724,24 +551,22 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
           </button>
         )}
         {hasPrompts && !allScored && (
-          <>
-            <button
-              onClick={handleScoreKPrompts}
-              disabled={isScoringBatch || scoringPromptId !== null}
-              style={{
-                padding: '10px 20px',
-                fontSize: '16px',
-                backgroundColor: '#2196F3',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: (isScoringBatch || scoringPromptId !== null) ? 'not-allowed' : 'pointer',
-                opacity: (isScoringBatch || scoringPromptId !== null) ? 0.6 : 1
-              }}
-            >
-              {isScoringBatch ? `Scoring ${scoreBatchSize} Prompts...` : `Score ${scoreBatchSize} Prompts`}
-            </button>
-          </>
+          <button
+            onClick={handleScoreBatch}
+            disabled={isScoringBatch}
+            style={{
+              padding: '10px 20px',
+              fontSize: '16px',
+              backgroundColor: '#2196F3',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: isScoringBatch ? 'not-allowed' : 'pointer',
+              opacity: isScoringBatch ? 0.6 : 1
+            }}
+          >
+            {isScoringBatch ? `Scoring ${scoreBatchSize} Prompts...` : `Score ${scoreBatchSize} Prompts`}
+          </button>
         )}
         {allScored && (
           <button
@@ -799,15 +624,6 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
                       {prompt.text}
                     </div>
                   </div>
-                  {prompt.state === 'pending' && (
-                    <button
-                      onClick={() => handleScorePrompt(prompt)}
-                      disabled={scoringPromptId !== null || isScoringBatch}
-                      style={{ padding: '8px 16px', marginLeft: '10px' }}
-                    >
-                      Score
-                    </button>
-                  )}
                   {prompt.state === 'scoring' && scoringBatchIds.has(prompt.id) && (
                     <span style={{
                       marginLeft: '10px',
@@ -817,7 +633,7 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
                       borderRadius: '4px',
                       fontSize: '14px'
                     }}>
-                      Scoring in batch...
+                      Scoring...
                     </span>
                   )}
                 </div>
@@ -827,7 +643,7 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
         )}
       </div>
 
-      {/* Feature 3: All Prompt Scores Chart */}
+      {/* Chart */}
       {allPromptsChartData.length > 0 && (
         <div style={{ marginTop: '30px', padding: '15px', border: '1px solid #ddd', borderRadius: '5px' }}>
           <h3>All Prompt Scores by Step ({allPromptsChartData.length} prompts)</h3>
@@ -898,7 +714,7 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
         </div>
       )}
 
-      {/* Feature 2: Prompt History Table */}
+      {/* History Table */}
       {allPrompts.length > 0 && (
         <div style={{ marginTop: '30px', padding: '15px', border: '1px solid #ddd', borderRadius: '5px' }}>
           <h3>All Prompts History ({allPrompts.length} total)</h3>
@@ -1019,4 +835,3 @@ export function OPROWorkspace({ session: initialSession, onBack }: OPROWorkspace
     </div>
   );
 }
-
